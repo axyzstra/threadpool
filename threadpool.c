@@ -1,6 +1,8 @@
 #include "threadpool.h"
 #include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
 #include <string.h>
 
 // 每次添加的线程数
@@ -89,7 +91,7 @@ ThreadPool *threadpoolCreate(int min, int max, int queueSize)
 
         // 工作者线程
         for (int i = 0; i < min; i++) {
-            pthread_create(pool->threadIDs[i], NULL, worker, pool);
+            pthread_create(&pool->threadIDs[i], NULL, worker, pool);
         }
         return pool;
     } while (0);
@@ -98,6 +100,79 @@ ThreadPool *threadpoolCreate(int min, int max, int queueSize)
     if (pool && pool->threadIDs) free(pool->threadIDs);
     if (pool) free(pool);
     return NULL;
+}
+
+int threadPoolDestroy(ThreadPool *pool)
+{
+    // 线程池为空
+    if (pool == NULL) {
+        return -1;
+    }
+    // 关闭线程池
+    pool->shutdown = 1;
+
+    // 阻塞回收管理者线程
+    pthread_join(pool->managerID, NULL);
+
+    // 唤醒消费者线程
+    for (int i = 0; i < pool->liveNum; i++) {
+        pthread_cond_signal(&pool->notEmpty);
+    }
+    // 释放堆内存
+    if (pool->taskQ) {
+        free(pool->taskQ);
+    }
+    if (pool->threadIDs) {
+        free(pool->threadIDs);
+    }
+    // 销毁锁和条件变量
+    pthread_mutex_destroy(&pool->mutexPool);
+    pthread_mutex_destroy(&pool->mutexBusy);
+    pthread_cond_destroy(&pool->notEmpty);
+    pthread_cond_destroy(&pool->notFull);
+
+    free(pool);
+    pool = NULL;
+
+    return 0;
+}
+
+// 任务添加
+void threadPoolAdd(ThreadPool *pool, void (*func)(void*), void *arg)
+{
+    pthread_mutex_lock(&pool->mutexPool);
+    // 若任务队列满了则阻塞
+    while (pool->queueSize == pool->queueCapacity && !pool->shutdown) {
+        pthread_cond_wait(&pool->notFull, &pool->mutexPool);
+    }
+    if (pool->shutdown) {
+        pthread_mutex_unlock(&pool->mutexPool);
+        return;
+    }
+    pool->taskQ[pool->queueRear].function = func;
+    pool->taskQ[pool->queueRear].arg = arg;
+    pool->queueRear = (pool->queueRear + 1) % pool->queueCapacity;
+    pool->queueSize++;
+
+    // 任务添加后，即可唤醒消费者
+    pthread_cond_signal(&pool->notEmpty);
+    pthread_mutex_unlock(&pool->mutexPool);
+}
+
+int threadPoolBusyNum(ThreadPool *pool)
+{
+    pthread_mutex_lock(&pool->mutexBusy);
+    int busyNum = pool->busyNum;
+    pthread_mutex_unlock(&pool->mutexBusy);
+    return busyNum;
+}
+
+int threadPoolAliveNum(ThreadPool *pool)
+{
+    pthread_mutex_lock(&pool->mutexPool);
+    int liveNum = pool->liveNum;
+    pthread_mutex_unlock(&pool->mutexPool);
+    return liveNum;
 }
 
 void *worker(void *arg)
