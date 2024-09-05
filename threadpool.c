@@ -3,6 +3,9 @@
 #include <stdio.h>
 #include <string.h>
 
+// 每次添加的线程数
+#define NUMBER 2
+
 // 任务
 typedef struct Task {
     void (*function)(void*);
@@ -99,10 +102,121 @@ ThreadPool *threadpoolCreate(int min, int max, int queueSize)
 
 void *worker(void *arg)
 {
+    ThreadPool* pool = (ThreadPool*) arg;
+    while (1) {
+        pthread_mutex_lock(&pool->mutexPool);
+        // 任务队列为空则工作线程阻塞
+        while (pool->queueSize == 0 && !pool->shutdown) {
+            pthread_cond_wait(&pool->notEmpty, &pool->mutexPool);
+            // 若线程唤醒后需要被销毁，则进行销毁，注意销毁时数量必须多于最小值
+            if (pool->exitNum > 0) {
+                pool->exitNum--;
+                if (pool->liveNum > pool->minNum) {
+                    pool->liveNum--;
+                    // 销毁前需要释放锁
+                    pthread_mutex_unlock(&pool->mutexPool);
+                    threadExit(pool);
+                }
+            }
+        }
+        // 若线程池关闭，则销毁当前线程
+        if (pool->shutdown) {
+            pthread_mutex_unlock(&pool->mutexPool);
+            threadExit(pool);
+        }
+
+        // 以下为正常情况，即从任务队列中取出任务进行处理
+        Task task;
+        task.function = pool->taskQ[pool->queueFront].function;
+        task.arg = pool->taskQ[pool->queueFront].arg;
+        // 取出任务后，头节点后移，此处为循环队列
+        pool->queueFront = (pool->queueFront + 1) % pool->queueCapacity;
+        pool->queueSize--;
+
+        // notFull 表示任务队列已满的条件变量，此处处理了一个任务队列
+        // 即可唤醒生产任务的线程继续生产任务
+        pthread_cond_signal(&pool->notFull);
+        pthread_mutex_unlock(&pool->mutexPool);
+
+        printf("thread %ld start working...\n", pthread_self());
+        pthread_mutex_lock(&pool->mutexBusy);
+        pool->busyNum++;
+        pthread_mutex_unlock(&pool->mutexBusy);
+        // 处理任务
+        task.function(task.arg);
+        free(task.arg);
+        task.arg = NULL;
+        printf("thread %ld end working...\n", pthread_self());
+
+        pthread_mutex_lock(&pool->mutexBusy);
+        pool->busyNum--;
+        pthread_mutex_unlock(&pool->mutexBusy);
+    }
     return NULL;
 }
 
 void *manager(void *arg)
 {
+    ThreadPool* pool = (ThreadPool*) arg;
+    // 若线程池不关闭，开始循环
+    while (!pool->shutdown) {
+        sleep(3);
+        // 读取线程池信息，作为管理的依据
+        pthread_mutex_lock(&pool->mutexPool);
+        // 任务个数
+        int queueSize = pool->queueSize;
+        // 存活的线程数
+        int liveNum = pool->liveNum;
+        pthread_mutex_unlock(&pool->mutexPool);
+
+        pthread_mutex_lock(&pool->mutexBusy);
+        // 正在忙的线程数
+        int busyNum = pool->busyNum;
+        pthread_mutex_unlock(&pool->mutexBusy);
+        // 现在得到了任务数，正在忙的线程，以及目前总线程数
+        // 管理者线程将根据这三个数据对线程进行管理
+
+        // 若任务个数 > 存活线程个数 && 存活线程数 < 最大线程数 则添加线程
+        if (queueSize > liveNum && liveNum < pool->maxNum) {
+            pthread_mutex_lock(&pool->mutexPool);
+            int count = 0;
+            for (int i = 0; i < pool->maxNum && 
+                            count < NUMBER && 
+                            liveNum < pool->maxNum; i++)
+            {
+                if (pool->threadIDs[i] == 0) {
+                    pthread_create(&pool->threadIDs[i], NULL, worker, pool);
+                    count++;
+                    pool->liveNum++;
+                }
+            }
+            pthread_mutex_unlock(&pool->mutexPool);
+        }
+
+        // 忙线程 * 2 < 存活的线程数 && 存活线程数 > 最小线程数 需要销毁多余的线程
+        if (pool->busyNum * 2 < pool->liveNum && pool->liveNum > pool->minNum) {
+            pthread_mutex_lock(&pool->mutexPool);
+            pool->exitNum = NUMBER;
+            pthread_mutex_unlock(&pool->mutexPool);
+            // 唤醒阻塞的线程，让其自动销毁
+            for (int i = 0; i < NUMBER; i++) {
+                pthread_cond_signal(&pool->notEmpty);
+            }
+        }
+    }
     return NULL;
+}
+
+// 销毁当前线程，并在线程池中注销
+void threadExit(ThreadPool *pool)
+{
+    pthread_t tid = pthread_self();
+    for (int i = 0; i < pool->maxNum; i++) {
+        if (pool->threadIDs[i] == tid) {
+            pool->threadIDs[i] = 0;
+            printf("threadExit() called, %ld exiting...\n", tid);
+            break;
+        }
+    }
+    pthread_exit(NULL);
 }
