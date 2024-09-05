@@ -1,5 +1,7 @@
 #include "threadpool.h"
 #include <pthread.h>
+#include <stdio.h>
+#include <string.h>
 
 // 任务
 typedef struct Task {
@@ -31,3 +33,76 @@ typedef struct ThreadPool {
 
     int shutdown;               // 判断是否需要销毁线程池，销毁为 1，反之为 0
 } ThreadPool;
+
+ThreadPool *threadpoolCreate(int min, int max, int queueSize)
+{
+    // 创建线程池
+    ThreadPool* pool = (ThreadPool*) malloc(sizeof(ThreadPool));
+    do {
+        if (pool == NULL) {
+            printf("malloc threadpool fail ... \n");
+            break;
+        }
+        
+        // 创建工作线程 id 数组
+        pool->threadIDs = (pthread_t*)malloc(sizeof(pthread_t) * max);
+        if (pool->threadIDs == NULL) {
+            printf("malloc threadIDs fail ...\n");
+            break;
+        }
+        memset(pool->threadIDs, 0, sizeof(pthread_t) * max);
+
+        pool->minNum = min;
+        pool->maxNum = max;
+        pool->busyNum = 0;
+        pool->liveNum = min;   // 目前存活的线程数，初始化时将在后面进行创建
+        pool->exitNum = 0;     // 需要退出的线程数，即管理线程计算后得出需要退出的线程数量
+
+
+        // 初始化锁和条件变量
+        if (pthread_mutex_init(&pool->mutexPool, NULL) != 0 ||
+            pthread_mutex_init(&pool->mutexBusy, NULL) != 0 ||
+            pthread_cond_init(&pool->notFull, NULL) != 0 ||
+            pthread_cond_init(&pool->notEmpty, NULL) != 0) 
+        {
+            printf("mutex or condition init fail ...\n");
+            break;
+        }
+        // 创建任务队列
+        pool->taskQ = (Task*)malloc(sizeof(Task) * queueSize);
+        if (pool->taskQ == NULL) {
+            printf("malloc taskQ fail...\n");
+            break;
+        }
+        pool->queueCapacity = queueSize;
+        pool->queueSize = 0;
+        pool->queueFront = 0;
+        pool->queueRear = 0;
+
+        pool->shutdown = 0;
+
+        // 创建管理者线程
+        pthread_create(&pool->managerID, NULL, manager, pool);
+
+        // 工作者线程
+        for (int i = 0; i < min; i++) {
+            pthread_create(pool->threadIDs[i], NULL, worker, pool);
+        }
+        return pool;
+    } while (0);
+
+    if (pool && pool->taskQ) free(pool->taskQ);
+    if (pool && pool->threadIDs) free(pool->threadIDs);
+    if (pool) free(pool);
+    return NULL;
+}
+
+void *worker(void *arg)
+{
+    return NULL;
+}
+
+void *manager(void *arg)
+{
+    return NULL;
+}
